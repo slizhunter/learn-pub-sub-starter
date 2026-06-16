@@ -33,20 +33,24 @@ func main() {
 	fmt.Println("Connected to RabbitMQ successfully!")
 
 	// Declare and bind a queue for this client to receive game log updates
-	_, queue, err := pubsub.DeclareAndBind(
+	err = pubsub.SubscribeGob(
 		conn,
 		routing.ExchangePerilTopic,
 		routing.GameLogSlug,
 		routing.GameLogSlug+".*",
 		pubsub.Durable,
-		amqp.Table{
-			"x-dead-letter-exchange": "peril_dlx",
+		func(msg routing.GameLog) pubsub.AckType {
+			defer fmt.Print("> ")
+			err := gamelogic.WriteLog(msg)
+			if err != nil {
+				fmt.Printf("Failed to write log: %v\n", err)
+			}
+			return pubsub.Ack
 		},
 	)
 	if err != nil {
 		log.Fatalf("Failed to declare and bind queue: %v", err)
 	}
-	fmt.Printf("Declared and bound queue %s successfully!\n", queue.Name)
 
 	gamelogic.PrintServerHelp()
 

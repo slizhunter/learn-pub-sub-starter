@@ -1,6 +1,8 @@
 package pubsub
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 
@@ -22,13 +24,13 @@ const (
 	Transient
 )
 
+// DeclareAndBind declares a queue with the given name and binds it to the specified exchange and routing key.
 func DeclareAndBind(
 	conn *amqp.Connection,
 	exchange,
 	queueName,
 	routingKey string,
 	queueType SimpleQueueType,
-	args amqp.Table,
 ) (*amqp.Channel, amqp.Queue, error) {
 	// Open a channel to RabbitMQ
 	ch, err := conn.Channel()
@@ -43,7 +45,9 @@ func DeclareAndBind(
 		queueType == Transient, // autoDelete
 		queueType == Transient, // exclusive
 		false,                  // noWait
-		args,                   // args
+		amqp.Table{
+			"x-dead-letter-exchange": "peril_dlx",
+		}, // args
 	)
 	if err != nil {
 		return nil, amqp.Queue{}, fmt.Errorf("failed to declare queue: %w", err)
@@ -54,7 +58,7 @@ func DeclareAndBind(
 		routingKey,    // routing key
 		exchange,      // exchange
 		false,         // noWait
-		args,          // args
+		nil,           // args
 	)
 	if err != nil {
 		return nil, amqp.Queue{}, fmt.Errorf("failed to bind queue: %w", err)
@@ -69,12 +73,67 @@ func SubscribeJSON[T any](
 	queueName,
 	routingKey string,
 	queueType SimpleQueueType,
-	args amqp.Table,
 	handler func(T) AckType,
 ) error {
-	ch, queue, err := DeclareAndBind(conn, exchange, queueName, routingKey, queueType, args)
+	return subscribe(
+		conn,
+		exchange,
+		queueName,
+		routingKey,
+		queueType,
+		handler,
+		func(data []byte) (T, error) {
+			var target T
+			if err := json.Unmarshal(data, &target); err != nil {
+				return target, fmt.Errorf("failed to unmarshal JSON: %w", err)
+			}
+			return target, nil
+		},
+	)
+}
+
+func SubscribeGob[T any](
+	conn *amqp.Connection,
+	exchange,
+	queueName,
+	routingKey string,
+	queueType SimpleQueueType,
+	handler func(T) AckType,
+) error {
+	return subscribe(
+		conn,
+		exchange,
+		queueName,
+		routingKey,
+		queueType,
+		handler,
+		func(data []byte) (T, error) {
+			var target T
+			if err := gob.NewDecoder(bytes.NewBuffer(data)).Decode(&target); err != nil {
+				return target, fmt.Errorf("failed to decode Gob: %w", err)
+			}
+			return target, nil
+		},
+	)
+}
+
+func subscribe[T any](
+	conn *amqp.Connection,
+	exchange,
+	queueName,
+	routingKey string,
+	queueType SimpleQueueType,
+	handler func(T) AckType,
+	unmarshaller func([]byte) (T, error),
+) error {
+	ch, queue, err := DeclareAndBind(conn, exchange, queueName, routingKey, queueType)
 	if err != nil {
 		return fmt.Errorf("failed to declare and bind queue: %w", err)
+	}
+
+	err = ch.Qos(10, 0, false)
+	if err != nil {
+		return fmt.Errorf("failed to set prefetch: %w", err)
 	}
 
 	msgCh, err := ch.Consume(
@@ -84,21 +143,21 @@ func SubscribeJSON[T any](
 		false,      // exclusive
 		false,      // no-local
 		false,      // no-wait
-		args,       // args
+		nil,        // args
 	)
 	if err != nil {
-		return fmt.Errorf("failed to register channel: %w", err)
+		return fmt.Errorf("failed to register channel consumer: %w", err)
 	}
 
 	go func() {
+		defer ch.Close()
 		for message := range msgCh {
-			var msg T
-			if err := json.Unmarshal(message.Body, &msg); err != nil {
-				fmt.Printf("failed to unmarshal JSON: %v\n", err)
+			target, err := unmarshaller(message.Body)
+			if err != nil {
+				fmt.Printf("failed to unmarshal message: %v\n", err)
 				continue
 			}
-			ack := handler(msg)
-			switch ack {
+			switch handler(target) {
 			case Ack:
 				message.Ack(false)
 			case NackRequeue:

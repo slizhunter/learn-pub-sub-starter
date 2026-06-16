@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
@@ -51,9 +52,12 @@ func handlerMove(gs *gamelogic.GameState, ch *amqp.Channel) func(gamelogic.ArmyM
 	}
 }
 
-func handlerWarMessages(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar) pubsub.AckType {
+func handlerWarMessages(gs *gamelogic.GameState, ch *amqp.Channel) func(gamelogic.RecognitionOfWar) pubsub.AckType {
 	return func(msg gamelogic.RecognitionOfWar) pubsub.AckType {
 		defer fmt.Print("> ")
+
+		var outcomeMsg string
+		var ackType pubsub.AckType
 		outcome, winner, loser := gs.HandleWar(msg)
 		switch outcome {
 		case gamelogic.WarOutcomeNotInvolved:
@@ -63,17 +67,27 @@ func handlerWarMessages(gs *gamelogic.GameState) func(gamelogic.RecognitionOfWar
 			fmt.Println("You have no more units left.")
 			return pubsub.NackDiscard
 		case gamelogic.WarOutcomeOpponentWon:
-			fmt.Printf("You lost the war with %s.\n", winner)
-			return pubsub.Ack
+			outcomeMsg = fmt.Sprintf("%s won a war against %s", winner, loser)
+			ackType = pubsub.Ack
 		case gamelogic.WarOutcomeYouWon:
-			fmt.Printf("You won the war with %s!\n", loser)
-			return pubsub.Ack
+			outcomeMsg = fmt.Sprintf("%s won a war against %s", winner, loser)
+			ackType = pubsub.Ack
 		case gamelogic.WarOutcomeDraw:
-			fmt.Printf("War with %s has ended. It's a draw.\n", msg.Attacker.Username)
-			return pubsub.Ack
+			outcomeMsg = fmt.Sprintf("A war between %s and %s resulted in a draw", winner, loser)
+			ackType = pubsub.Ack
 		default:
 			fmt.Printf("Outcome not recognized: %v\n", outcome)
 			return pubsub.NackDiscard
 		}
+		err := pubsub.PublishGameLog(ch, routing.GameLog{
+			CurrentTime: time.Now(),
+			Username:    msg.Attacker.Username,
+			Message:     outcomeMsg,
+		})
+		if err != nil {
+			fmt.Printf("Failed to publish game log: %v\n", err)
+			return pubsub.NackRequeue
+		}
+		return ackType
 	}
 }

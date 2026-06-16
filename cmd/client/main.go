@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"strconv"
+	"time"
 
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
@@ -45,9 +47,6 @@ func main() {
 		fmt.Sprintf("%s.%s", routing.PauseKey, username),
 		routing.PauseKey,
 		pubsub.Transient,
-		amqp.Table{
-			"x-dead-letter-exchange": "peril_dlx",
-		},
 		handlerPause(gs),
 	)
 	if err != nil {
@@ -61,9 +60,6 @@ func main() {
 		fmt.Sprintf("%s.%s", routing.ArmyMovesPrefix, username),
 		routing.ArmyMovesPrefix+".*",
 		pubsub.Transient,
-		amqp.Table{
-			"x-dead-letter-exchange": "peril_dlx",
-		},
 		handlerMove(gs, ch),
 	)
 	if err != nil {
@@ -77,8 +73,7 @@ func main() {
 		routing.WarRecognitionsPrefix,
 		routing.WarRecognitionsPrefix+".*",
 		pubsub.Durable,
-		nil,
-		handlerWarMessages(gs),
+		handlerWarMessages(gs, ch),
 	)
 	if err != nil {
 		log.Fatalf("Failed to subscribe to war messages: %v", err)
@@ -121,7 +116,29 @@ func main() {
 		case "help":
 			gamelogic.PrintClientHelp()
 		case "spam":
-			fmt.Println("Spamming not allowed yet!")
+			if len(inputs) == 2 {
+				intVal, err := strconv.Atoi(inputs[1])
+				if err != nil {
+					fmt.Printf("Invalid number: %v\n", err)
+					continue
+				}
+				// Use intVal for spamming logic
+				for i := 0; i < intVal; i++ {
+					bagLog := gamelogic.GetMaliciousLog()
+					err = pubsub.PublishGameLog(ch, routing.GameLog{
+						CurrentTime: time.Now(),
+						Username:    username,
+						Message:     bagLog,
+					})
+					if err != nil {
+						log.Printf("Failed to publish game log: %v", err)
+					}
+				}
+			} else {
+				fmt.Println("Invalid input.")
+				fmt.Println("Usage: spam <number_of_messages>")
+			}
+
 		case "quit":
 			gamelogic.PrintQuit()
 			// Break out of loop
